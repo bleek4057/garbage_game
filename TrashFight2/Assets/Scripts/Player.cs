@@ -11,6 +11,8 @@ public class Player : MonoBehaviour {
     private MOVE moveState;
 
     public float moveSpeed;
+    public float maxMoveSpeed;
+    private float baseMoveSpeed;
 
     public float dashSpeed;
     public float dashDuration;
@@ -31,7 +33,7 @@ public class Player : MonoBehaviour {
     private bool throwActive;
     public GameObject projectilePrefab;
 
-    private float health;
+    public float health;
     public float maxHealth;
 
     [Range(0,1)]
@@ -44,20 +46,41 @@ public class Player : MonoBehaviour {
 
     public int myAbilityVolumeLayer;
 
+    private bool knockingBack;
+    private int knockBackDir;
+
+    //+ or -
+    public int movementDir;
+
     public bool alive = true;
-	
+    private float startKnockbackTime;
+    public float knockbackTime;
+    public float knockbackAmount;
+
+    public float runningAwayDampen;
+
+    public ParticleSystem hitParticle;
+
+    public Camera cam;
+    private Animator anim;
+
+    //Note from John. This is all bad. Don't do this in a real game
+
     void Awake() {
         health = maxHealth;
+        baseMoveSpeed = moveSpeed;
     }
 
     void Start () {
-		
+
 	}
 	
 	void Update () {
         if(alive) {
-            CheckAbilities();
-            CheckMove();
+            if(!CheckKnockback()) {
+                CheckAbilities();
+                CheckMove();
+            }
         }
         CheckDead();
     }
@@ -68,16 +91,32 @@ public class Player : MonoBehaviour {
             }
         }
     }
+    private bool CheckKnockback() {
+        if(knockingBack) {
+            if(Time.time < startKnockbackTime + knockbackTime) {
+                //also kind of stuns you
+                centerPoint.eulerAngles = new Vector3(0, centerPoint.eulerAngles.y + knockBackDir * knockbackAmount, 0);
+                return true;
+            } else {
+                knockingBack = false;
+                return false;
+            }
+        }
+
+        return false;
+    }
     private void CheckAbilities() {
         //If there's no attack active, we can attack
         if(attackState == ATTACK.NONE) {
             if (playerID == 0) {
-                if (Input.GetKey(KeyCode.F)) {
+                if (Input.GetKeyDown(KeyCode.F)) {
                     Punch();
-                } else if (Input.GetKey(KeyCode.G)) {
+                } else if (Input.GetKeyDown(KeyCode.G)) {
                     Kick();
-                } else if (Input.GetKey(KeyCode.H)) {
+                } else if (Input.GetKeyDown(KeyCode.H)) {
                     Throw();
+                }else if(Input.GetKeyDown(KeyCode.Space)) {
+                    Dash();
                 }
 
             } else {
@@ -87,6 +126,8 @@ public class Player : MonoBehaviour {
                     Kick();
                 } else if (Input.GetKey(KeyCode.L)) {
                     Throw();
+                } else if(Input.GetKeyDown(KeyCode.RightShift)) {
+                    Dash();
                 }
             }
 
@@ -111,6 +152,7 @@ public class Player : MonoBehaviour {
                 case ATTACK.DASH:
                     if (TimerComplete(lastAttackTime, dashDuration)) {
                         attackState = ATTACK.NONE;
+                        moveSpeed = baseMoveSpeed;
                     }
                     break;
             }
@@ -127,29 +169,50 @@ public class Player : MonoBehaviour {
         }
         return false;
     }
+    private void StartWalk() {
+        anim.SetTrigger("Walk");
+    }
     private void CheckMove() {
         float moveAmount = 0;
 
         if(playerID == 0) {
-            if (Mathf.Abs(Input.GetAxis("Player0Horiz")) > 0) { moveAmount = -moveSpeed * Input.GetAxis("Player0Horiz"); }
+            if (Mathf.Abs(Input.GetAxis("Player0Horiz")) > 0) { moveAmount = -moveSpeed * (Input.GetAxis("Player0Horiz") > 0 ? 1 : -1); }
         } else {
-            if (Mathf.Abs(Input.GetAxis("Player1Horiz")) > 0) { moveAmount = -moveSpeed * Input.GetAxis("Player1Horiz"); }
+            if (Mathf.Abs(Input.GetAxis("Player1Horiz")) > 0) { moveAmount = -moveSpeed * (Input.GetAxis("Player1Horiz") > 0 ? 1 : -1);  }
         }
 
         if(moveAmount > 0) {
             //Turn right
-            transform.localRotation = Quaternion.Euler(new Vector3(0,-90,0));
+            movementDir = -1;
+            transform.localRotation = Quaternion.Euler(new Vector3(0, -90, 0));
         } else if(moveAmount < 0) {
             //Turn left
+            movementDir = 1;
             transform.localRotation = Quaternion.Euler(new Vector3(0, 90, 0));
         }
 
-        centerPoint.rotation = Quaternion.Euler(new Vector3(0, centerPoint.eulerAngles.y + moveAmount, 0));
+        //If we're moving counter clockwise and the opponent is a head of us, clockwise 
+        if(moveAmount < 0 && opponent.transform.parent.eulerAngles.y > transform.parent.eulerAngles.y) {
+            moveAmount *= runningAwayDampen;
+
+        //If we're moving clockwise and the oppenent is a head of us counter clockwise
+        }else if (moveAmount > 0 && opponent.transform.parent.eulerAngles.y < transform.parent.eulerAngles.y) {
+            moveAmount *= runningAwayDampen;
+        }
+
+        if (attackState != ATTACK.DASH) {
+            if(Mathf.Abs(moveAmount) > maxMoveSpeed){
+                moveAmount = moveAmount > 0 ? maxMoveSpeed : -maxMoveSpeed;
+            }
+        }
+
+        centerPoint.eulerAngles = new Vector3(0, centerPoint.eulerAngles.y + moveAmount, 0);
     }
 
     private void Dash() {
         attackState = ATTACK.DASH;
         lastAttackTime = Time.time;
+        moveSpeed *= dashSpeed;
     }
     private void Punch() {
         attackState = ATTACK.PUNCH;
@@ -166,6 +229,14 @@ public class Player : MonoBehaviour {
         lastAttackTime = Time.time;
     }
     private void TakeDamage(float _damage) {
+        if(!alive) {
+            return;
+        }
+
+        cam.GetComponent<CameraShake>().CamShake(0.2f, 0.2f);
+        hitParticle.Emit(70);
+        Knockback(opponent.movementDir);
+
         health -= _damage;
         if(health <= 0) {
             Die();
@@ -175,8 +246,13 @@ public class Player : MonoBehaviour {
         print("Player " + playerID  + " died");
         alive = false;
     }
+    private void Knockback(int _dir) {
+        knockingBack = true;
+        knockBackDir = -_dir;
+        startKnockbackTime = Time.time;
+    }
     private void OnTriggerEnter(Collider _other) {
-        print("Triggered!!");
+        //print("Triggered!!");
         if(_other.gameObject.layer != myAbilityVolumeLayer) {
             switch (_other.tag) {
                 case "PunchVolume":
